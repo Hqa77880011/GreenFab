@@ -53,3 +53,59 @@ def execute(args):
     import json
     from pathlib import Path
     result=optimize(json.loads(Path(args.input).read_text()),args.variant);out=Path(args.output);out.mkdir(parents=True,exist_ok=True);(out/'allocation.json').write_text(json.dumps(result,indent=2))
+
+
+def scenario_problem(prediction, data, expansion):
+    """Build finite-scenario minimization objectives from calibrated upper bounds."""
+    if not np.isfinite(expansion) or expansion<0:
+        raise ValueError('Finite calibrated scenario bounds require enough independent calibration groups')
+    objectives=np.asarray(prediction['upper'],dtype=float)+expansion
+    count,scenarios,outcomes=objectives.shape
+    probabilities=np.asarray(data['probabilities'],dtype=float)
+    distance=np.asarray(data['distance'],dtype=float)
+    feasible=np.asarray(data['feasible'])
+    radius=float(np.asarray(data['radius']).item())
+    if not np.isfinite(objectives).all() or not np.isfinite(probabilities).all() or probabilities.shape!=(scenarios,) or (probabilities<0).any() or not np.isclose(probabilities.sum(),1):
+        raise ValueError('Finite objective cube and normalized scenario probabilities are required')
+    if distance.shape!=(scenarios,scenarios) or not np.isfinite(distance).all() or (distance<0).any() or not np.allclose(distance,distance.T) or not np.allclose(np.diag(distance),0):
+        raise ValueError('Scenario distance must be finite symmetric nonnegative with zero diagonal')
+    if feasible.shape!=(count,) or not np.isin(feasible,[0,1]).all() or not np.isfinite(radius) or radius<0:
+        raise ValueError('Supply a physical feasible mask and nonnegative Wasserstein radius')
+    preferences=np.asarray(data.get('preferences',np.empty((0,2),dtype=int)))
+    if preferences.shape!=(len(preferences),2) or not np.isin(preferences,np.arange(count)).all():
+        raise ValueError('Preferences must be pairs of candidate indices')
+    return {'objectives':objectives.tolist(),'probabilities':probabilities.tolist(),
+            'distance':distance.tolist(),'radius':radius,'feasible':feasible.astype(bool).tolist(),
+            'preferences':preferences.astype(int).tolist(),'objectives_source':'calibrated_surrogate_upper',
+            'outcomes':outcomes}
+
+
+def export(args):
+    """Export model predictions on candidate-by-scenario features to allocation JSON."""
+    import json
+    from pathlib import Path
+    state=torch.load(args.model,map_location=args.device,weights_only=True)
+    if 'interval_expansion' not in state:
+        raise ValueError('Calibrate the surrogate on independent fab-day groups before export')
+    model=Model(state['config']).to(args.device);model.load_state_dict(state['state']);model.eval()
+    with np.load(args.input,allow_pickle=False) as archive:
+        data={key:archive[key] for key in archive.files}
+    x=np.asarray(data['x'])
+    if x.ndim!=3 or not np.isfinite(x).all():
+        raise ValueError('Scenario x must be finite candidates,scenarios,features')
+    if 'group' in data:
+        excluded=state.get('training_groups',[])+state.get('validation_groups',[])+state.get('calibration_groups',[])
+        if np.intersect1d(data['group'],excluded).size:
+            raise ValueError('Decision/evaluation scenario groups overlap surrogate fitting or calibration')
+    with torch.no_grad():
+        prediction=model({'x':torch.as_tensor(x.reshape(-1,x.shape[-1]),device=args.device)})
+    upper=prediction['upper'].cpu().numpy().reshape(*x.shape[:2],-1)
+    problem=scenario_problem({'upper':upper},data,state['interval_expansion'])
+    candidate_ids=np.asarray(data.get('candidate_ids',np.arange(len(x))))
+    scenario_ids=np.asarray(data.get('scenario_ids',np.arange(x.shape[1])))
+    if candidate_ids.shape!=(len(x),) or scenario_ids.shape!=(x.shape[1],):
+        raise ValueError('Candidate/scenario IDs must match their feature axes')
+    problem['candidate_ids']=candidate_ids.tolist()
+    problem['scenario_ids']=scenario_ids.tolist()
+    target=Path(args.output);target.parent.mkdir(parents=True,exist_ok=True)
+    target.write_text(json.dumps(problem,indent=2,allow_nan=False),encoding='utf-8')

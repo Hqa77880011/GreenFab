@@ -71,3 +71,32 @@ greenfab execute --input example.json --output runs/execution --variant full
 ```
 
 The example is an explicit analytical/simulated input specification, not an experiment result. Replace it with the schema described above for application data. The execute path writes the actual selected actions, constraints, and mechanism metrics.
+
+## Selected calibrated allocation setting
+
+Use eight input features, four dimensionless minimized outcomes, the included
+width-32 surrogate, 90% independent fab-day group calibration, finite scenario
+transport and the preference simplex. Normalize outcome units using training
+statistics before preparing NPZ files; reverse signs of maximized objectives
+before fitting. The chosen robust objective is the calibrated surrogate upper
+endpoint, so interval uncertainty actually enters allocation.
+
+```bash
+greenfab train --input data/prepared --config config.json --output runs/surrogate --variant full --epochs 100 --seed 13
+greenfab calibrate --input data/prepared/calibration.npz --model runs/surrogate/model.pt --output runs/surrogate/calibrated.pt
+greenfab export --input data/candidate_scenarios.npz --model runs/surrogate/calibrated.pt --output runs/allocation_problem.json
+greenfab execute --input runs/allocation_problem.json --output runs/allocation --variant full
+```
+
+Candidate/scenario NPZ contains x[A,S,8], probabilities[S] summing to one,
+symmetric nonnegative distance[S,S] with zero diagonal, scalar radius>=0,
+physical feasible[A], and optional integer preferences[L,2], candidate_ids and
+scenario_ids. The export path executes the frozen calibrated model, preserves
+candidate/scenario order and writes the allocation JSON consumed by execute.
+Optional group IDs are checked against stored fitting/validation/calibration
+roles. The feasible mask is an input physical constraint, never inferred from a
+surrogate prediction. Infinite calibration expansion cannot become a finite
+allocation objective. At least nine independent calibration groups permit a
+finite 90% bound. The generated feature/outcome setting and explicit example.json
+remain self-contained analytic controls; real factory inputs/constraints are
+needed only for factory-specific claims.

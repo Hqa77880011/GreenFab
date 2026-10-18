@@ -1,4 +1,7 @@
 {
   "width": 32,
-  "outcomes": 4
+  "outcomes": 4,
+  "input_shape": [
+    8
+  ]
 }
